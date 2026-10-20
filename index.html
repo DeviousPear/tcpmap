@@ -7,6 +7,10 @@
 <style>
   html, body, #map { height: 100%; margin: 0; }
   #info { position: absolute; top: 10px; right: 10px; z-index: 1000; background: rgba(0,0,0,0.7); color: #fff; padding: 8px; border-radius: 4px; font-family: sans-serif; max-width: 320px; }
+  .searchbar { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1001; display: flex; gap: 6px; background: rgba(0,0,0,0.6); padding: 6px; border-radius: 6px; }
+  .searchbar select, .searchbar input { padding: 6px 8px; border: none; border-radius: 4px; font-size: 13px; }
+  .searchbar input { width: 240px; }
+  #searchinfo { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); z-index: 1001; color: #fff; font-family: sans-serif; font-size: 12px; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 4px; }
   #legend { position: absolute; bottom: 10px; left: 10px; z-index: 1000; background: rgba(0,0,0,0.7); color: #fff; padding: 8px; border-radius: 4px; font-family: sans-serif; font-size: 12px; }
   #legend div { display: flex; align-items: center; margin: 2px 0; }
   #legend span.swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 50%; }
@@ -20,6 +24,20 @@
 </head>
 <body>
 <div id="map"></div>
+<div class="searchbar">
+  <select id="category">
+    <option value="all">All</option>
+    <option value="ip">IP</option>
+    <option value="domain">Domain</option>
+    <option value="type">Type</option>
+    <option value="port">Port</option>
+    <option value="service">Service</option>
+    <option value="location">Location</option>
+    <option value="isp">ISP</option>
+  </select>
+  <input id="search" type="text" placeholder="Search..." />
+</div>
+<div id="searchinfo"></div>
 <div id="legend"></div>
 <div id="info">IPs: <span id="count">0</span></div>
 <script type="module">
@@ -35,20 +53,10 @@ const map = new maplibregl.Map({
 const linesData = { type: 'FeatureCollection', features: [] };
 const pendingLines = [];
 const ipLocations = [];
+const entries = []; // { marker, data, lineFeature }
 
 function makeLine(from, to) {
   return { type: 'Feature', geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] } };
-}
-
-function addLine(from, to) {
-  const feature = makeLine(from, to);
-  const source = map.getSource('lines');
-  if (source) {
-    linesData.features.push(feature);
-    source.setData(linesData);
-  } else {
-    pendingLines.push(feature);
-  }
 }
 
 map.on('load', () => {
@@ -68,14 +76,8 @@ const countEl = document.getElementById('count');
 let count = 0;
 
 const typeColors = {
-  HTTP: '#ff851b',
-  HTTPS: '#2ecc40',
-  QUIC: '#b10dc9',
-  TCP: '#0074d9',
-  UDP: '#ffdc00',
-  ICMP: '#aaaaaa',
-  IGMP: '#aaaaaa',
-  ARP: '#8b4513',
+  HTTP: '#ff851b', HTTPS: '#2ecc40', QUIC: '#b10dc9', TCP: '#0074d9',
+  UDP: '#ffdc00', ICMP: '#aaaaaa', IGMP: '#aaaaaa', ARP: '#8b4513',
 };
 function colorFor(type) { return typeColors[type] || '#ff4136'; }
 
@@ -95,7 +97,6 @@ function setCurrent(lat, lng) {
   new maplibregl.Marker({ color: '#00ff00' }).setLngLat([lng, lat]).addTo(map)
     .setPopup(new maplibregl.Popup().setText('You'));
   map.flyTo({ center: [lng, lat], zoom: 6 });
-  for (const to of ipLocations) addLine(current, to);
 }
 
 navigator.geolocation.getCurrentPosition(
@@ -127,20 +128,80 @@ function popupHtml(d) {
   return html;
 }
 
+function fieldValue(d, cat) {
+  switch (cat) {
+    case 'ip': return d.ip;
+    case 'domain': return d.hostname;
+    case 'type': return d.connection;
+    case 'port': return d.port;
+    case 'service': return d.service;
+    case 'location': return [d.city, d.region, d.country].join(' ');
+    case 'isp': return [d.isp, d.org, d.as].join(' ');
+    default: return [d.ip, d.hostname, d.connection, d.port, d.service, d.city, d.region, d.country, d.isp, d.org, d.as].join(' ');
+  }
+}
+
+function matches(d, q, cat) {
+  if (!q) return true;
+  q = q.toLowerCase();
+  const v = fieldValue(d, cat);
+  return v != null && String(v).toLowerCase().includes(q);
+}
+
+function rebuildLines() {
+  linesData.features = [];
+  if (!current) return;
+  entries.forEach(e => {
+    if (e.lineFeature && e.visible) linesData.features.push(e.lineFeature);
+  });
+  const source = map.getSource('lines');
+  if (source) source.setData(linesData);
+}
+
+function applyFilter() {
+  const q = document.getElementById('search').value.trim();
+  const cat = document.getElementById('category').value;
+  let visible = 0;
+  entries.forEach(e => {
+    e.visible = matches(e.data, q, cat);
+    const el = e.marker.getElement();
+    if (el) el.style.display = e.visible ? '' : 'none';
+    if (e.visible) visible++;
+  });
+  rebuildLines();
+  document.getElementById('searchinfo').textContent = (q || cat !== 'all')
+    ? (visible + ' / ' + entries.length + ' shown')
+    : '';
+}
+
+document.getElementById('search').addEventListener('input', applyFilter);
+document.getElementById('category').addEventListener('change', applyFilter);
+
 const es = new EventSource('/events');
 es.onmessage = (e) => {
   const d = JSON.parse(e.data);
   if (d.lat == null || d.lon == null) return;
   const to = { lat: d.lat, lng: d.lon };
-  // Avoid duplicate markers for replayed/enriched updates: skip if already plotted.
   if (ipLocations.some(l => l.lat === to.lat && l.lng === to.lng && l._ip === d.ip)) return;
   to._ip = d.ip;
   ipLocations.push(to);
-  new maplibregl.Marker({ color: colorFor(d.connection) }).setLngLat([to.lng, to.lat]).addTo(map)
+  const marker = new maplibregl.Marker({ color: colorFor(d.connection) }).setLngLat([to.lng, to.lat]).addTo(map)
     .setPopup(new maplibregl.Popup().setHTML(popupHtml(d)));
-  if (current) addLine(current, to);
+  const entry = { marker, data: d, lineFeature: null, visible: true };
+  if (current) {
+    entry.lineFeature = makeLine(current, to);
+    const source = map.getSource('lines');
+    if (source) {
+      linesData.features.push(entry.lineFeature);
+      source.setData(linesData);
+    } else {
+      pendingLines.push(entry.lineFeature);
+    }
+  }
+  entries.push(entry);
   count++;
   countEl.textContent = count;
+  applyFilter();
 };
 </script>
 </body>

@@ -169,7 +169,7 @@ async function enrich(ip, connection, port) {
 })();
 
 Bun.serve({
-  port: 3000,
+  port: 1234,
   routes: {
     "/": new Response(html, {
       headers: { "Content-Type": "text/html" },
@@ -198,4 +198,5 @@ Bun.serve({
   },
 });
 
-console.log("listening on http://localhost:3000");
+
+Bun.spawn(["open", "http://localhost:1234"])
