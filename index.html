@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>tcpmap</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"/>
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  #info { position: absolute; top: 10px; right: 10px; z-index: 1000; background: rgba(0,0,0,0.7); color: #fff; padding: 8px; border-radius: 4px; font-family: sans-serif; max-width: 320px; }
+  #legend { position: absolute; bottom: 10px; left: 10px; z-index: 1000; background: rgba(0,0,0,0.7); color: #fff; padding: 8px; border-radius: 4px; font-family: sans-serif; font-size: 12px; }
+  #legend div { display: flex; align-items: center; margin: 2px 0; }
+  #legend span.swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 50%; }
+  .popup-card { font-family: system-ui, sans-serif; min-width: 200px; }
+  .popup-card .title { font-size: 15px; font-weight: 700; margin-bottom: 8px; color: #111; border-bottom: 1px solid #eee; padding-bottom: 6px; }
+  .popup-card .row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; margin: 3px 0; }
+  .popup-card .label { color: #666; font-weight: 600; }
+  .popup-card .value { color: #222; text-align: right; word-break: break-word; }
+  .popup-card .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; color: #fff; font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="legend"></div>
+<div id="info">IPs: <span id="count">0</span></div>
+<script type="module">
+import maplibregl from 'https://esm.sh/maplibre-gl@4.7.1';
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  center: [0, 20],
+  zoom: 2,
+});
+
+const linesData = { type: 'FeatureCollection', features: [] };
+const pendingLines = [];
+const ipLocations = [];
+
+function makeLine(from, to) {
+  return { type: 'Feature', geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] } };
+}
+
+function addLine(from, to) {
+  const feature = makeLine(from, to);
+  const source = map.getSource('lines');
+  if (source) {
+    linesData.features.push(feature);
+    source.setData(linesData);
+  } else {
+    pendingLines.push(feature);
+  }
+}
+
+map.on('load', () => {
+  for (const f of pendingLines) linesData.features.push(f);
+  pendingLines.length = 0;
+  map.addSource('lines', { type: 'geojson', data: linesData });
+  map.addLayer({
+    id: 'lines-layer',
+    type: 'line',
+    source: 'lines',
+    paint: { 'line-color': '#ff4136', 'line-width': 2, 'line-opacity': 0.9 },
+  });
+});
+
+let current = null;
+const countEl = document.getElementById('count');
+let count = 0;
+
+const typeColors = {
+  HTTP: '#ff851b',
+  HTTPS: '#2ecc40',
+  QUIC: '#b10dc9',
+  TCP: '#0074d9',
+  UDP: '#ffdc00',
+  ICMP: '#aaaaaa',
+  IGMP: '#aaaaaa',
+  ARP: '#8b4513',
+};
+function colorFor(type) { return typeColors[type] || '#ff4136'; }
+
+const legend = document.getElementById('legend');
+Object.keys(typeColors).forEach(t => {
+  const row = document.createElement('div');
+  const sw = document.createElement('span');
+  sw.className = 'swatch';
+  sw.style.background = typeColors[t];
+  row.appendChild(sw);
+  row.appendChild(document.createTextNode(t));
+  legend.appendChild(row);
+});
+
+function setCurrent(lat, lng) {
+  current = { lat, lng };
+  new maplibregl.Marker({ color: '#00ff00' }).setLngLat([lng, lat]).addTo(map)
+    .setPopup(new maplibregl.Popup().setText('You'));
+  map.flyTo({ center: [lng, lat], zoom: 6 });
+  for (const to of ipLocations) addLine(current, to);
+}
+
+navigator.geolocation.getCurrentPosition(
+  p => setCurrent(p.coords.latitude, p.coords.longitude),
+  e => { console.error(e); setCurrent(0, 0); }
+);
+
+function row(label, value) {
+  if (value == null || value === '') return '';
+  return '<div class="row"><span class="label">' + label + '</span><span class="value">' + value + '</span></div>';
+}
+function popupHtml(d) {
+  const badgeColor = colorFor(d.connection);
+  let html = '<div class="popup-card">';
+  html += '<div class="title">' + d.ip + '</div>';
+  if (d.connection) {
+    html += '<div class="row"><span class="label">Type</span><span class="value"><span class="badge" style="background:' + badgeColor + '">' + d.connection + (d.port ? ' :' + d.port : '') + '</span></span></div>';
+  }
+  html += row('Service', d.service);
+  html += row('Host', d.hostname);
+  html += row('Location', [d.city, d.region, d.country].filter(Boolean).join(', '));
+  html += row('Coords', d.lat != null ? d.lat + ', ' + d.lon : null);
+  html += row('Timezone', d.timezone);
+  html += row('ISP', d.isp);
+  html += row('Org', d.org);
+  html += row('AS', d.as);
+  if (d.proxy) html += row('Proxy', 'yes');
+  html += '</div>';
+  return html;
+}
+
+const es = new EventSource('/events');
+es.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+  if (d.lat == null || d.lon == null) return;
+  const to = { lat: d.lat, lng: d.lon };
+  // Avoid duplicate markers for replayed/enriched updates: skip if already plotted.
+  if (ipLocations.some(l => l.lat === to.lat && l.lng === to.lng && l._ip === d.ip)) return;
+  to._ip = d.ip;
+  ipLocations.push(to);
+  new maplibregl.Marker({ color: colorFor(d.connection) }).setLngLat([to.lng, to.lat]).addTo(map)
+    .setPopup(new maplibregl.Popup().setHTML(popupHtml(d)));
+  if (current) addLine(current, to);
+  count++;
+  countEl.textContent = count;
+};
+</script>
+</body>
+</html>
